@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -17,57 +18,58 @@ import (
 	"github.com/ncruces/zenity"
 )
 
+//go:embed assets/assets.zip
+var assetsFile []byte
+
 func init() {
-	log.Println("Baixando arquivos base....")
+	log.Println("\n@@@@@@@@@@@@@@@@@@@@@@@@@\n@ Filosofighters v1.0 @\n@@@@@@@@@@@@@@@@@@@@@@@@@")
 	dlg, err := zenity.Progress(zenity.Title("Aguarde...."), zenity.Pulsate(), zenity.NoCancel())
 	if err != nil {
 		panic(err)
-	}
-	g := got.New()
-	dlg.Text("Baixando arquivos necessários")
-	err = g.Download("https://cdn.discordapp.com/attachments/653565137252515851/1153833686496718878/assets.zip", "assets.zip")
+	} //Inicia o dialogo de progresso
+	log.Println("Desempacotando arquivos base...")
+	dlg.Text("Extraindo arquivos necessários")
+
+	err = os.WriteFile("assets.zip", assetsFile, fs.FileMode(os.O_CREATE)) //Salva o arquivo em assets/assets.zip para o disco local
 	if err != nil {
+		zenity.Error("Não foi possível criar o arquivo\n"+err.Error(), zenity.Title("Falha"), zenity.ErrorIcon)
+		panic(err)
+	}
+	err = Unzip("assets.zip", ".") //Descompacta o arquivo
+	if err != nil {
+		zenity.Error(err.Error(), zenity.Title("Impossivel continuar:"))
+	}
+
+	log.Println("Baixando Ruffle...")
+
+	g := got.New()
+	dlg.Text("Baixando o player de flash")
+	err = g.Download("https://github.com/ruffle-rs/ruffle/releases/download/nightly-2023-09-20/ruffle-nightly-2023_09_20-windows-x86_64.zip", "ruffle.zip")
+	if err != nil { //Baixa a última versão do Ruffle na data em que escrevo este comentário
 		zenity.Error("Não foi possivel baixar o arquivo. Verifique a conexão com a rede", zenity.Title("Falha grave"), zenity.ErrorIcon)
 		panic(err)
 	}
 	dlg.Text("Descompactando...")
-	err = Unzip("assets.zip", ".")
+	err = Unzip("ruffle.zip", ".") //Descompacta o arquivo baixado
 	if err != nil {
 		zenity.Error(err.Error(), zenity.Title("Impossivel continuar:"))
 	}
 	dlg.Close()
 }
 
-func startHttpServer(wg *sync.WaitGroup) *http.Server {
-	http.Handle("/", http.FileServer(http.Dir("./server")))
-	svr := &http.Server{
-		Addr: ":4444",
-	}
-
-	go func() {
-		defer wg.Done()
-
-		if err := svr.ListenAndServe(); err != http.ErrServerClosed {
-			zenity.Error("Não foi possível iniciar o servidor HTTP!\n"+err.Error(), zenity.Title("Falha grave!"))
-			log.Fatalf("ListenAndServe(): %v", err)
-		}
-	}()
-	return svr
-}
-
 func main() {
 	log.Println("Iniciando servidor HTTP...")
-	httpServerExitDone := &sync.WaitGroup{}
+	httpServerExitDone := &sync.WaitGroup{} //Inicia o servidor HTTP
 
-	httpServerExitDone.Add(1)
-	srv := startHttpServer(httpServerExitDone)
+	httpServerExitDone.Add(1)                  //Adiciona o counter para o WaitGroup
+	srv := startHttpServer(httpServerExitDone) //Inicia o servidor HTTP
 
 	zenity.Info("Antes do jogo iniciar, nota importante:\n- Você pode jogar APENAS COM Karl Marx, Platão, Agostinho e Maquiavel.\n\n-Você pode jogar APENAS CONTRA Platão e Karl Max.\n\nIgnorar este aviso resultará em um game congelado.", zenity.Title("AVISO!"), zenity.WarningIcon)
 	zenity.Notify("Antes do jogo iniciar, nota importante:\n- Você pode jogar APENAS COM Karl Marx, Platão, Agostinho e Maquiavel.\n\n-Você pode jogar APENAS CONTRA Platão e Karl Max.\n\nIgnorar este aviso resultará em um game congelado.", zenity.WarningIcon, zenity.Title("Aviso"))
 
-	cmd := exec.Command("cmd", "/c", "ruffle.exe", "server/game.swf")
+	cmd := exec.Command("cmd", "/c", "ruffle.exe", "server/game.swf") //Executa o Ruffle com o jogo
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Stdout = io.Discard
+	cmd.Stdout = io.Discard //Bug do jogo: Após a primeira batalha muitos erros são mostrados no console, degradando a performance, essa linha descarta o que for printado
 	err := cmd.Run()
 	if err != nil {
 		zenity.Error("Não foi possível iniciar o Ruffle!\nImpossivel continuar", zenity.Title("Falha grave!"))
@@ -79,15 +81,37 @@ func main() {
 		panic(err)
 	}
 
-	httpServerExitDone.Wait()
+	httpServerExitDone.Wait() //Fecha o servidor HTTP
 	log.Println("Servidor HTTP fechado.")
 
 	os.Remove("ruffle.exe")
-	os.RemoveAll("server")
+	os.Remove("LICENSE.md")
+	os.Remove("assets.zip")
+	os.Remove("ruffle.zip")
+	os.RemoveAll("server") //Limpa todos os arquivos criados.
 	log.Println("Limpeza concluída, saindo...")
 }
 
+func startHttpServer(wg *sync.WaitGroup) *http.Server {
+	//Função que cria o servidor http com um WaitGroup. Isso permite que o servidor possa ser fechado em qualquer momento.
+	http.Handle("/", http.FileServer(http.Dir("./server")))
+	svr := &http.Server{
+		Addr: ":4444",
+	}
+
+	go func() {
+		defer wg.Done()
+
+		if err := svr.ListenAndServe(); err != http.ErrServerClosed {
+			zenity.Error("Não foi possível iniciar o servidor HTTP!\n"+err.Error(), zenity.Title("Falha grave!"))
+			log.Fatalf("Erro do servidor HTTP: %v", err)
+		}
+	}()
+	return svr
+}
+
 func Unzip(source, destination string) error {
+	//Retirado de: https://gist.github.com/paulerickson/6d8650947ee4e3f3dbcc28fde10eaae7
 	archive, err := zip.OpenReader(source)
 	if err != nil {
 		return err
